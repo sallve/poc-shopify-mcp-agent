@@ -7,7 +7,7 @@ import MCPClient from "../mcp-client";
 import { saveMessage, getConversationHistory, storeCustomerAccountUrl, getCustomerAccountUrl } from "../db.server";
 import AppConfig from "../services/config.server";
 import { createSseStream } from "../services/streaming.server";
-import { createClaudeService } from "../services/claude.server";
+import { createOpenAIService } from "../services/openai.server";
 import { createToolService } from "../services/tool.server";
 import { unauthenticated } from "../shopify.server";
 
@@ -128,7 +128,8 @@ async function handleChatSession({
   stream
 }) {
   // Initialize services
-  const claudeService = createClaudeService();
+  // const claudeService = createClaudeService();
+  const llmService = createOpenAIService(); // Use OpenAI instead of Claude
   const toolService = createToolService();
 
   // Initialize MCP client
@@ -186,8 +187,10 @@ async function handleChatSession({
     // Execute the conversation stream
     let finalMessage = { role: 'user', content: userMessage };
 
-    while (finalMessage.stop_reason !== "end_turn") {
-      finalMessage = await claudeService.streamConversation(
+    // Replace stop_reason logic for OpenAI (OpenAI does not use stop_reason)
+    let finished = false;
+    while (!finished) {
+      finalMessage = await llmService.streamConversation(
         {
           messages: conversationHistory,
           promptType,
@@ -216,13 +219,33 @@ async function handleChatSession({
 
             // Send a completion message
             stream.sendMessage({ type: 'message_complete' });
+            finished = true;
           },
 
-          // Handle tool use requests
-          onToolUse: async (content) => {
-            const toolName = content.name;
-            const toolArgs = content.input;
-            const toolUseId = content.id;
+          // Handle tool use requests (function calls)
+          onToolUse: async (functionCall) => {
+            const toolName = functionCall?.name;
+            let toolArgs = functionCall?.arguments;
+
+            // Defensive: skip if toolName is missing
+            if (!toolName) {
+              console.error("OpenAI function_call missing name:", functionCall);
+              return;
+            }
+
+            // Only parse toolArgs if it's a non-empty string
+            if (typeof toolArgs === "string" && toolArgs.trim() !== "") {
+              try {
+                toolArgs = JSON.parse(toolArgs);
+              } catch (e) {
+                console.error("Failed to parse tool arguments:", toolArgs, e);
+                toolArgs = {};
+              }
+            } else if (!toolArgs) {
+              toolArgs = {};
+            }
+
+            const toolUseId = toolName; // OpenAI doesn't provide id, fallback to name
 
             const toolUseMessage = `Calling tool: ${toolName} with arguments: ${JSON.stringify(toolArgs)}`;
 
@@ -259,15 +282,7 @@ async function handleChatSession({
             stream.sendMessage({ type: 'new_message' });
           },
 
-          // Handle content block completion
-          onContentBlock: (contentBlock) => {
-            if (contentBlock.type === 'text') {
-              stream.sendMessage({
-                type: 'content_block_complete',
-                content_block: contentBlock
-              });
-            }
-          }
+          // OpenAI does not have content blocks, so skip onContentBlock
         }
       );
     }
