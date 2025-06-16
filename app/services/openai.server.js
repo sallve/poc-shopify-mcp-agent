@@ -1,6 +1,6 @@
 /**
  * OpenAI Service
- * Manages interactions with the OpenAI API
+ * Manages interactions with the OpenAI Responses API and MCP tools
  */
 import OpenAI from "openai";
 import AppConfig from "./config.server";
@@ -16,15 +16,14 @@ export function createOpenAIService(apiKey = process.env.OPENAI_API_KEY) {
   const openai = new OpenAI({ apiKey });
 
   /**
-   * Streams a conversation with OpenAI
+   * Streams a conversation with OpenAI using the Responses API and MCP tools
    * @param {Object} params - Stream parameters
-   * @param {Array} params.messages - Conversation history
+   * @param {Array} params.messages - Conversation history (ignored, only latest user message is used)
    * @param {string} params.promptType - The type of system prompt to use
-   * @param {Array} params.tools - Available tools for OpenAI (functions)
+   * @param {Array} params.tools - Array of MCP tool server definitions (from MCPClient)
    * @param {Object} streamHandlers - Stream event handlers
    * @param {Function} streamHandlers.onText - Handles text chunks
    * @param {Function} streamHandlers.onMessage - Handles complete messages
-   * @param {Function} streamHandlers.onToolUse - Handles tool use requests (function calls)
    * @returns {Promise<Object>} The final message
    */
   const streamConversation = async ({
@@ -35,44 +34,50 @@ export function createOpenAIService(apiKey = process.env.OPENAI_API_KEY) {
     // Get system prompt from configuration or use default
     const systemInstruction = getSystemPrompt(promptType);
 
-    // Prepare OpenAI messages (prepend system prompt)
-    const openaiMessages = [
-      { role: "system", content: systemInstruction },
-      ...messages
-    ];
+    // Find the latest user message
+    const lastUserMessage = [...messages].reverse().find(m => m.role === "user");
+    const userInput = lastUserMessage ? lastUserMessage.content : "";
 
-    // Prepare function definitions if tools are provided
-    const functions = tools && tools.length > 0 ? tools : undefined;
+    // --- FIX: Map tools to valid MCP tool definitions for OpenAI Responses API ---
+    // Only include tools with a valid server_url
+    const mcpTools = (tools || [])
+      .filter(tool => tool.server_url)
+      .map(tool => ({
+        type: "mcp",
+        server_label: tool.server_label || "shopify",
+        server_url: tool.server_url,
+        require_approval: tool.require_approval || "never",
+        ...(tool.headers ? { headers: tool.headers } : {})
+      }));
 
-    // Call OpenAI Chat Completion with streaming (v4+)
-    const stream = await openai.chat.completions.create({
+    // Compose the input for the Responses API
+    let input = userInput;
+    if (systemInstruction) {
+      input = `${systemInstruction}\n${userInput}`;
+    }
+
+    // Call the Responses API (no streaming yet, as streaming is not generally available for responses.create)
+    const response = await openai.responses.create({
       model: AppConfig.api.defaultModel,
-      max_tokens: AppConfig.api.maxTokens,
-      messages: openaiMessages,
-      stream: true,
-      ...(functions ? { functions } : {})
+      tools: mcpTools,
+      input
     });
 
-    let finalMessage = { role: "assistant", content: "" };
-
-    for await (const chunk of stream) {
-      const delta = chunk.choices?.[0]?.delta;
-      if (delta?.content) {
-        finalMessage.content += delta.content;
-        if (streamHandlers.onText) {
-          streamHandlers.onText(delta.content);
-        }
-      }
-      // Handle function call (tool use)
-      if (delta?.function_call && streamHandlers.onToolUse) {
-        streamHandlers.onToolUse(delta.function_call);
-      }
+    // Handle output
+    if (streamHandlers.onText && response.output_text) {
+      streamHandlers.onText(response.output_text);
     }
-
     if (streamHandlers.onMessage) {
-      streamHandlers.onMessage(finalMessage);
+      streamHandlers.onMessage({
+        role: "assistant",
+        content: response.output_text
+      });
     }
-    return finalMessage;
+
+    return {
+      role: "assistant",
+      content: response.output_text
+    };
   };
 
   /**

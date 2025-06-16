@@ -6,7 +6,7 @@
 export const AppConfig = {
   // API Configuration
   api: {
-    defaultModel: 'gpt-3.5-turbo', // or 'gpt-4' if you have access
+    defaultModel: 'gpt-4.1', // or 'gpt-4o' if you have access
     maxTokens: 2000,
     defaultPromptType: 'standardAssistant',
   },

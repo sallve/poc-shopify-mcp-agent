@@ -229,7 +229,13 @@ async function handleChatSession({
 
             // Defensive: skip if toolName is missing
             if (!toolName) {
-              console.error("OpenAI function_call missing name:", functionCall);
+              console.warn("OpenAI function_call missing name, ending turn to avoid infinite loop:", functionCall);
+              // Optionally, send a message to the client
+              stream.sendMessage({
+                type: 'error',
+                error: 'The AI tried to call a tool without specifying which one. Please try rephrasing your request.'
+              });
+              finished = true; // End the loop to avoid repeated errors
               return;
             }
 
